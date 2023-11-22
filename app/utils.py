@@ -4,6 +4,7 @@ import mysql.connector
 import os
 import pandas as pd
 from dotenv import load_dotenv
+import datetime
 
 # Load environment variables from .env file
 load_dotenv()
@@ -126,6 +127,20 @@ def fetch_transactions_and_balance(transaction_type, entity_id):
 
     connection.close()
     return transactions, balance_amount
+
+# Function to fetch Transaction_Status_ID based on status
+def fetch_transaction_status_id(status):
+    query = f"SELECT Transaction_Status_ID FROM Transaction_Status WHERE status = '{status}'"
+    connection = create_connection()
+    result = fetch_data(connection, query)
+    return result[0][0] if result else None
+
+# Function to fetch the ID of the last inserted row
+def fetch_last_inserted_id(connection):
+    query = "SELECT LAST_INSERT_ID()"
+    result = fetch_data(connection, query)
+    return result[0][0] if result else None
+
 
 def get_menu_options(user_role):
     common_options = ["Home"]
@@ -450,8 +465,9 @@ def show_user_menu(connection, user):
         supplier_list = fetch_supplier_list()
         buyer_list = fetch_buyer_list()
 
-        transaction_column_names = ["Transaction_ID", "Type", "Date", "Quantity", "Total_Amount", "Payment_Method", 
-                                    "Transaction_Status", "Item_Name"]
+        transaction_column_names = ['Transaction_ID', 'type', 'date', 'quantity', 'total_amount', 'payment_method',
+                                     'transaction_status', 'item_name']
+
 
         if transaction_type == "With Supplier":
             supplier_entity = st.selectbox("Select Supplier", [f"{supplier[1]} (ID: {supplier[0]})" for supplier in supplier_list])
@@ -474,7 +490,7 @@ def show_user_menu(connection, user):
             st.table(transactions_df)
 
             # Display balance amount
-            st.info(f"Balance Amount with {supplier_entity}: {balance_amount}")
+            st.info(f"Balance Amount to be paid to {supplier_entity}: {balance_amount}")
 
         elif transaction_type == "With Buyer":
             buyer_entity = st.selectbox("Select Buyer", [f"{buyer[1]} (ID: {buyer[0]})" for buyer in buyer_list])
@@ -497,8 +513,128 @@ def show_user_menu(connection, user):
             st.table(transactions_df)
 
             # Display balance amount
-            st.info(f"Balance Amount with {buyer_entity}: {balance_amount}")
+            st.info(f"Balance Amount to be paid by {buyer_entity}: {balance_amount}")
+
+        # Add Transaction
+        st.subheader("Add Transaction")
+        transaction_date = st.date_input("Transaction Date", datetime.date.today())
+        transaction_quantity = st.number_input("Quantity", min_value=1, step=1)
+        transaction_total_amount = st.number_input("Total Amount", min_value=0.0)
+        transaction_payment_method = st.text_input("Payment Method")
+        item_id = st.number_input("Item ID", min_value=1, step=1)
+
+
+        if transaction_type == "With Supplier":
+            selected_supplier = st.selectbox("Select supplier you are transacting with", [f"{supplier[1]} (ID: {supplier[0]})" for supplier in supplier_list])
+            entity_id = int(selected_supplier.split("(ID: ")[1].split(")")[0])
+            entity_type = "Seller"
+        else:
+            selected_buyer = st.selectbox("Select buyer you are transacting with", [f"{buyer[1]} (ID: {buyer[0]})" for buyer in buyer_list])
+            entity_id = int(selected_buyer.split("(ID: ")[1].split(")")[0])
+            entity_type = "Buyer"
+        
+        if st.button("Add Transaction"):
+
+            # Perform the database insertion for the new transaction
+            # Set the initial status of the transaction to "initialised"
+            initial_status = "initialised"
+            insert_transaction_query = f"""
+                INSERT INTO Transaction (type, date, quantity, total_amount, payment_method, Trader_ID, Transaction_Status_ID, Item_ID)
+                VALUES ('{transaction_type}', '{transaction_date}', {transaction_quantity}, {transaction_total_amount}, 
+                        '{transaction_payment_method}', {user["Trader_ID"]}, {fetch_transaction_status_id(initial_status)}, {item_id})
+            """
+            execute_query(connection, insert_transaction_query)
+
+            # Retrieve the ID of the newly added transaction
+            transaction_id = fetch_last_inserted_id(connection)
+
+            # Insert into Seller_Transaction or Buyer_Transaction based on the transaction type
+            if transaction_type == "With Supplier":
+                seller_id = entity_id
+                insert_seller_transaction_query = f"""
+                    INSERT INTO Seller_Transaction (Transaction_ID, Seller_ID)
+                    VALUES ({transaction_id}, {seller_id})
+                """
+                execute_query(connection, insert_seller_transaction_query)
+            elif transaction_type == "With Buyer":
+                buyer_id = entity_id
+                insert_buyer_transaction_query = f"""
+                    INSERT INTO Buyer_Transaction (Transaction_ID, Buyer_ID)
+                    VALUES ({transaction_id}, {buyer_id})
+                """
+                execute_query(connection, insert_buyer_transaction_query)
+
+            # Display success message
+            st.success("Transaction Added Successfully!")
+
+
+        # Modify Transaction Status
+        st.subheader("Modify Transaction Status")
+
+        # Allow the user to select a transaction by Transaction ID
+        selected_transaction_id = st.number_input("Select Transaction ID", min_value=1, step=1)
+
+        # Fetch the current status of the selected transaction
+        current_status_query = f"SELECT Transaction_Status_ID FROM Transaction WHERE Transaction_ID = {selected_transaction_id}"
+        current_status_id = fetch_data(connection, current_status_query)
+
+        if current_status_id:
+            current_status_id = current_status_id[0][0]
+
+            # Fetch the corresponding status string
+            current_status_string_query = f"SELECT status FROM Transaction_Status WHERE Transaction_Status_ID = {current_status_id}"
+            current_status_string = fetch_data(connection, current_status_string_query)[0][0]
+
+            st.info(f"Current Status of Transaction {selected_transaction_id}: {current_status_string}")
+
+            # Define the possible status modifications based on the current status
+            if current_status_string == "initialised":
+                new_status_options = ["cancelled", "fulfilled", "completed"]
+            elif current_status_string == "fulfilled":
+                new_status_options = ["completed"]
+            else:
+                new_status_options = []
+
+            if new_status_options:
+                new_status = st.selectbox("Select New Transaction Status", new_status_options)
+
+                if st.button("Modify Transaction Status"):
+                    # Perform the database update for the new transaction status
+                    update_transaction_status_query = f"""
+                        UPDATE Transaction
+                        SET Transaction_Status_ID = {fetch_transaction_status_id(new_status)}
+                        WHERE Transaction_ID = {selected_transaction_id};
+                    """
+                    execute_query(connection, update_transaction_status_query)
+
+                    st.success(f"Transaction {selected_transaction_id} status modified to {new_status} successfully!")
+            else:
+                st.warning("Cannot modify the transaction status based on the current status.")
+        else:
+            st.warning("Invalid Transaction ID. Please enter a valid Transaction ID.")
 
     elif choice == "Inventory Management" and user["role"] == "trader":
         st.subheader("Inventory Management")
         # Implement Inventory Management UI here
+        items = fetch_data(connection, "SELECT * FROM Item")
+        if items:
+            st.write("All Items:")
+            items_df = pd.DataFrame(items, columns=["Item_ID", "Name", "Type", "Grade", "Price_per_Unit", "Current_Stock"])
+            st.table(items_df)
+        else:
+            st.warning("No items found.")
+
+        # Add a new item
+        st.subheader("Add a New Item")
+        new_item_name = st.text_input("Item Name")
+        new_item_type = st.text_input("Item Type")
+        new_item_grade = st.text_input("Item Grade")
+        new_item_price = st.number_input("Price per Unit", min_value=0.0)
+
+        if st.button("Add Item"):
+            add_item_query = f"""
+                INSERT INTO Item (name, type, grade, price_per_unit, current_stock)
+                VALUES ('{new_item_name}', '{new_item_type}', '{new_item_grade}', {new_item_price}, 0)
+            """
+            execute_query(connection, add_item_query)
+            st.success("Item Added Successfully!")
