@@ -128,6 +128,39 @@ def fetch_transactions_and_balance(transaction_type, entity_id):
     connection.close()
     return transactions, balance_amount
 
+def fetch_transactions_and_balance_entity(entity_type, entity_id):
+    connection = create_connection()
+    cursor = connection.cursor(dictionary=True)
+    if entity_type == "supplier":
+        query = f"""
+            SELECT t.*, ts.status AS transaction_status, i.name AS item_name
+            FROM Transaction t
+            JOIN Transaction_Status ts ON t.Transaction_Status_ID = ts.Transaction_Status_ID
+            JOIN Item i ON t.Item_ID = i.Item_ID
+            WHERE t.Transaction_ID IN (
+                SELECT Transaction_ID FROM Seller_Transaction WHERE Seller_ID = {entity_id}
+            )
+        """
+    elif entity_type == "buyer":
+        query = f"""
+            SELECT t.*, ts.status AS transaction_status, i.name AS item_name
+            FROM Transaction t
+            JOIN Transaction_Status ts ON t.Transaction_Status_ID = ts.Transaction_Status_ID
+            JOIN Item i ON t.Item_ID = i.Item_ID
+            WHERE t.Transaction_ID IN (
+                SELECT Transaction_ID FROM Buyer_Transaction WHERE Buyer_ID = {entity_id}
+            )
+        """
+
+    cursor.execute(query)
+    transactions = cursor.fetchall()
+
+    # Fetch balance amount
+    balance_query = f"SELECT balance_amount FROM {entity_type.capitalize()} WHERE {entity_type.capitalize()}_ID = {entity_id}"
+    balance_amount = fetch_data(connection, balance_query)[0][0]
+
+    return transactions, balance_amount
+
 # Function to fetch Transaction_Status_ID based on status
 def fetch_transaction_status_id(status):
     query = f"SELECT Transaction_Status_ID FROM Transaction_Status WHERE status = '{status}'"
@@ -141,6 +174,14 @@ def fetch_last_inserted_id(connection):
     result = fetch_data(connection, query)
     return result[0][0] if result else None
 
+def fetch_trader_profile(connection, trader_id):
+    query = f"SELECT * FROM Trader WHERE Trader_ID = {trader_id}"
+    trader_profile = fetch_data(connection, query)
+    return trader_profile[0] if trader_profile else None
+
+def update_item_price(connection, item_id, new_price):
+    update_query = f"UPDATE Item SET price_per_unit = {new_price} WHERE Item_ID = {item_id}"
+    execute_query(connection, update_query)
 
 def get_menu_options(user_role):
     common_options = ["Home"]
@@ -165,45 +206,48 @@ def show_user_menu(connection, user):
     # Home Page
     if choice == "Home":
         st.subheader(f"Welcome to APMC Trader System, {user['role'].capitalize()}")
-        st.write("This is a simple Streamlit application for the APMC Trader System.")
+        st.write("This is a simple Streamlit+MySQL application for the APMC Trader System.")
 
     # Trader Profile Page
     elif choice == "Trader Profile":
         st.subheader(f"{user['role'].capitalize()} Profile Management")
 
-        profile_info = {
-        "Trader_ID": user["Trader_ID"],
-        "Name": user["name"],
-        "Address": user["address"],
-        "Phone": user["phone"],
-        "Current Holdings Amount": user["current_holdings_amount"],
-        "Password": "*" * len(user["password"]),  # Display stars for password
-        }
+        trader_profile = fetch_trader_profile(connection, user["Trader_ID"])
 
-        profile_info= pd.DataFrame(profile_info.items(), columns=("Detail", "Value"))
-
-        st.table(profile_info)
-
-        # Implement Profile Management UI here
-        st.subheader("Edit Trader Details")
-        new_name = st.text_input("New Name", user["name"])
-        new_address = st.text_input("New Address", user["address"])
-        new_phone = st.text_input("New Phone", user["phone"])
-        new_password = st.text_input("New Password", user["password"], type="password")
-
-        if st.button("Update Details"):
-            # Perform update operations in the database
-            update_trader_details(connection, user["Trader_ID"], new_name, new_address, new_phone, new_password)
-
-            # Update the user profile with the new details
-
-            updated_profile_info = {
-                "Name": new_name,
-                "Address": new_address,
-                "Phone": new_phone,
-                "Password": "*" * len(new_password),  # Display stars for password
+        if trader_profile:
+            # Display trader profile details as a table
+            profile_info = {
+                "Trader_ID": trader_profile[0],
+                "Name": trader_profile[1],
+                "Address": trader_profile[2],
+                "Phone": trader_profile[3],
+                "Current Holdings Amount": trader_profile[4],
+                "Password": "*" * len(trader_profile[5]),  # Display stars for password
             }
-            st.success("Details Updated Successfully!")
+
+            profile_info_df = pd.DataFrame(profile_info.items(), columns=("Detail", "Value"))
+            st.table(profile_info_df)
+
+            # Implement Profile Management UI here
+            st.subheader("Edit Trader Details")
+            new_name = st.text_input("New Name", trader_profile[1])
+            new_address = st.text_input("New Address", trader_profile[2])
+            new_phone = st.text_input("New Phone", trader_profile[3])
+            new_password = st.text_input("New Password", trader_profile[5], type="password")
+
+            if st.button("Update Details"):
+                # Perform update operations in the database
+                update_trader_details(connection, user["Trader_ID"], new_name, new_address, new_phone, new_password)
+
+                # Update the user profile with the new details
+
+                updated_profile_info = {
+                    "Name": new_name,
+                    "Address": new_address,
+                    "Phone": new_phone,
+                    "Password": "*" * len(new_password),  # Display stars for password
+                }
+                st.success("Details Updated Successfully!")
             
     # Other Pages based on user role
     elif choice == "Employee Management" and user["role"] == "trader":
@@ -638,3 +682,45 @@ def show_user_menu(connection, user):
             """
             execute_query(connection, add_item_query)
             st.success("Item Added Successfully!")
+        
+        st.subheader("Update Item Price")
+        item_id_to_update = st.number_input("Item ID to Update", min_value=1, step=1)
+
+        # Fetch the existing details of the selected item
+        item_details_query = f"SELECT * FROM Item WHERE Item_ID = {item_id_to_update}"
+        item_details = fetch_data(connection, item_details_query)
+
+        if item_details:
+            current_item = item_details[0]
+
+            # Input field for updating price
+            updated_item_price = st.number_input("Updated Price per Unit", value=float(current_item[4]), min_value=0.0)
+
+            if st.button("Update Item Price"):
+                # Perform the database update for the selected item
+                update_item_price(connection, item_id_to_update, updated_item_price)
+                st.success("Item Price Updated Successfully!")
+        else:
+            st.warning("Item not found.")
+
+    elif choice == "Transaction Recording" and user["role"] in ["supplier", "buyer"]:
+        st.subheader("Transaction Recording")
+
+        entity_type = user["role"]
+        entity_id = user[f"{entity_type.capitalize()}_ID"]
+
+        # Fetch and display transactions and balance amount
+        transactions, balance_amount = fetch_transactions_and_balance_entity(entity_type, entity_id)
+
+        # Convert transactions to a pandas DataFrame
+        transaction_column_names = ['Transaction_ID', 'type', 'date', 'quantity', 'total_amount', 'payment_method',
+                                     'transaction_status', 'item_name']
+        if transactions:
+            transactions_df = pd.DataFrame(transactions, columns=transaction_column_names)
+
+            # Display transactions as a table
+            st.write(f"All Transactions for {entity_type.capitalize()}:")
+            st.table(transactions_df)
+
+        # Display balance amount
+        st.info(f"Balance Amount: {balance_amount}")
